@@ -1,0 +1,16 @@
+# Gradle / Android build çıktıları
+.gradle/
+build/
+app/build/
+local.properties
+
+# IDE / araçlar
+.claude/
+.idea/
+*.iml
+.DS_Store
+
+# İmzalama
+*.jks
+*.keystore
+keystore.properties
