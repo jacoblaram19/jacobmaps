@@ -126,6 +126,46 @@ class NavRoute {
         return Math.max(0, geometryLength() - d);
     }
 
+    /**
+     * GPS noktasını rotaya izdüşürüp "rota başından kaç metre" değerini verir.
+     *
+     * Tüm rotayı taramak yerine son bilinen konumun etrafındaki pencereye bakıyoruz:
+     * 291 km'lik rotada 4749 nokta var, her düzeltmede hepsini taramak gereksiz ve
+     * rotanın kendisiyle kesiştiği yerlerde yanlış eşleşme üretir.
+     */
+    double snapTo(LatLng p, double hint, double window) {
+        if (points.size() < 2) return 0;
+        double total = geometryLength();
+        double lo = Math.max(0, hint - window), hi = Math.min(total, hint + window);
+        int i0 = indexFor(lo), i1 = indexFor(hi);
+
+        double bestD = Double.MAX_VALUE, bestAt = hint;
+        for (int i = i0; i <= i1 && i < points.size() - 1; i++) {
+            LatLng a = points.get(i), b = points.get(i + 1);
+            double segLen = cum[i + 1] - cum[i];
+            if (segLen <= 0) continue;
+            // Küçük mesafelerde düzlem yaklaşımı yeterli.
+            double t = projectT(a, b, p);
+            LatLng q = Geo.lerp(a, b, t);
+            double d = Geo.distance(p, q);
+            if (d < bestD) { bestD = d; bestAt = cum[i] + segLen * t; }
+        }
+        return bestAt;
+    }
+
+    /** Noktanın a-b parçası üzerindeki oransal izdüşümü (0..1). */
+    private double projectT(LatLng a, LatLng b, LatLng p) {
+        double kx = Math.cos(Math.toRadians(a.getLatitude()));
+        double ax = a.getLongitude() * kx, ay = a.getLatitude();
+        double bx = b.getLongitude() * kx, by = b.getLatitude();
+        double px = p.getLongitude() * kx, py = p.getLatitude();
+        double dx = bx - ax, dy = by - ay;
+        double len2 = dx * dx + dy * dy;
+        if (len2 <= 0) return 0;
+        double t = ((px - ax) * dx + (py - ay) * dy) / len2;
+        return t < 0 ? 0 : (t > 1 ? 1 : t);
+    }
+
     private int indexFor(double d) {
         int lo = 0, hi = cum.length - 1;
         while (lo < hi - 1) {

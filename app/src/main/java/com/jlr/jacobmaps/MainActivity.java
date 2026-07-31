@@ -2,6 +2,7 @@ package com.jlr.jacobmaps;
 
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -45,6 +46,13 @@ import org.maplibre.geojson.Point;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * JacobMaps — tek ekranlı navigasyon.
@@ -102,6 +110,10 @@ public class MainActivity extends Activity {
     /** Kullanıcı haritayı elle gezdirdiyse kamera ona karışmıyor. */
     private boolean freeRoam = false;
 
+    private Locator locator;
+    /** true: gerçek GPS, false: simülasyon. */
+    private boolean liveMode = false;
+
     // ---- yaşam döngüsü ----------------------------------------------------
 
     @Override protected void onCreate(Bundle b) {
@@ -110,6 +122,7 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         bindViews();
+        locator = new Locator(this, this::onGpsFix);
         addPuck();
         applyUiTheme();
 
@@ -172,6 +185,7 @@ public class MainActivity extends Activity {
         btnRecenter = findViewById(R.id.btn_recenter);
 
         btnPrimary.setOnClickListener(v -> onPrimary());
+        btnPrimary.setOnLongClickListener(v -> { searchDialog(); return true; });
         btnOffline.setOnClickListener(v -> downloadOffline());
         btnView.setOnClickListener(v -> cycleCam());
         btnSecondary.setOnClickListener(v -> cycleSpeed());
@@ -262,10 +276,12 @@ public class MainActivity extends Activity {
         if (!styleReady()) return;
 
         style.addImage("pin", drawableToBitmap(R.drawable.pin));
+        style.addImage("veh", drawableToBitmap(R.drawable.puck));
 
         style.addSource(new GeoJsonSource("route-src"));
         style.addSource(new GeoJsonSource("traveled-src"));
         style.addSource(new GeoJsonSource("dest-src"));
+        style.addSource(new GeoJsonSource("veh-src"));
 
         int casing = dark ? 0xFF0A0F14 : 0xFFFFFFFF;
         int main   = dark ? 0xFF4DA3FF : 0xFF0B7BE0;
@@ -289,6 +305,15 @@ public class MainActivity extends Activity {
                 PropertyFactory.lineWidth(8.5f),
                 PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
                 PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)));
+
+        // Serbest dolaşımda araç ekrana değil HARİTAYA sabitlenmeli; o yüzden bu
+        // katman var. Takip kipinde gizleniyor, yerini sabit View alıyor.
+        style.addLayer(new SymbolLayer("veh-layer", "veh-src").withProperties(
+                PropertyFactory.iconImage("veh"),
+                PropertyFactory.iconSize(0.85f),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP)));
 
         style.addLayer(new SymbolLayer("dest-layer", "dest-src").withProperties(
                 PropertyFactory.iconImage("pin"),
@@ -334,10 +359,85 @@ public class MainActivity extends Activity {
     private void onPrimary() {
         if (navigating) { stopNavigation(); return; }
         if (route == null) { fetchRoute(); return; }
+        // Gerçek sürüş: izin varsa GPS'e bağlan, yoksa iste.
+        if (!Locator.granted(this)) { locator.requestPermission(); return; }
+        liveMode = true;
         startNavigation();
     }
 
+    @Override public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
+        super.onRequestPermissionsResult(req, perms, res);
+        if (req == Locator.REQ_PERMISSION) {
+            if (Locator.granted(this)) { liveMode = true; startNavigation(); }
+            else toast("konum izni yok, Sim ile deneyebilirsin");
+        }
+    }
+
+    /** GPS düzeltmesi: rotaya izdüşür, simülatöre hedef olarak ver. */
+    private void onGpsFix(LatLng p, double bearing, double speed, float accuracy) {
+        if (!navigating || route == null || sim == null || !sim.isLive()) return;
+        if (accuracy > 60) return;                 // çok belirsiz düzeltmeyi yok say
+        double snapped = route.snapTo(p, sim.getDistance(), 600);
+        sim.onFix(snapped, speed >= 0 ? speed : 0);
+    }
+
+    /** Basit yer araması (Nominatim). Uzun basınca açılır. */
+    private void searchDialog() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("yer ara: Enez, Edirne, benzinci...");
+        new AlertDialog.Builder(this)
+                .setTitle("Ara")
+                .setView(input)
+                .setPositiveButton("Ara", (d, w) -> geocode(input.getText().toString()))
+                .setNegativeButton("Vazgeç", null)
+                .show();
+    }
+
+    private void geocode(final String query) {
+        if (query == null || query.trim().isEmpty()) return;
+        subtitle.setText("aranıyor: " + query);
+        new Thread(() -> {
+            HttpURLConnection c = null;
+            try {
+                String url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
+                        + URLEncoder.encode(query, "UTF-8");
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setRequestProperty("User-Agent", "JacobMaps/1.0");
+                c.setConnectTimeout(12000);
+                c.setReadTimeout(20000);
+                StringBuilder sb = new StringBuilder();
+                try (BufferedReader r = new BufferedReader(
+                        new InputStreamReader(c.getInputStream(), "UTF-8"))) {
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line);
+                }
+                JSONArray arr = new JSONArray(sb.toString());
+                if (arr.length() == 0) { ui(() -> subtitle.setText("bulunamadı: " + query)); return; }
+                JSONObject o = arr.getJSONObject(0);
+                final LatLng p = new LatLng(o.getDouble("lat"), o.getDouble("lon"));
+                final String name = o.optString("display_name", query);
+                ui(() -> {
+                    destination = p;
+                    route = null;
+                    title.setText(name.length() > 40 ? name.substring(0, 40) + "…" : name);
+                    subtitle.setText("hedef seçildi");
+                    btnPrimary.setText("Rota kur");
+                    drawDestination();
+                    map.animateCamera(CameraUpdateFactory.newLatLngZoom(p, 13), 800);
+                });
+            } catch (Exception e) {
+                ui(() -> subtitle.setText("arama başarısız"));
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }).start();
+    }
+
+    private void ui(Runnable r) { runOnUiThread(r); }
+
     private void fetchRoute() {
+        LatLng known = locator.lastKnown();
+        if (known != null) origin = known;
         btnPrimary.setText("Rota hesaplanıyor…");
         subtitle.setText("OSRM üzerinden çiziliyor");
         router.route(origin, destination, new Router.Callback() {
@@ -350,6 +450,8 @@ public class MainActivity extends Activity {
                         r.distance / 1000, Math.floor(r.duration / 3600),
                         Math.floor((r.duration % 3600) / 60), r.steps.size()));
                 btnPrimary.setText("Sürüşü başlat");
+                btnSecondary.setVisibility(View.VISIBLE);
+                btnSecondary.setText("Sim");
             }
             @Override public void onError(String message) {
                 btnPrimary.setText("Tekrar dene");
@@ -384,7 +486,11 @@ public class MainActivity extends Activity {
             }
         });
         sim.reset();
-        sim.setMultiplier(8);
+        sim.setLive(liveMode);
+        if (liveMode) {
+            if (!locator.start()) { liveMode = false; sim.setLive(false); }
+        }
+        if (!sim.isLive()) sim.setMultiplier(8);
 
         camMode = Cam.FOLLOW;
         freeRoam = false;
@@ -395,7 +501,7 @@ public class MainActivity extends Activity {
         puck.setVisibility(View.VISIBLE);
         btnPrimary.setText("Bitir");
         btnSecondary.setVisibility(View.VISIBLE);
-        btnSecondary.setText("8×");
+        btnSecondary.setText(sim.isLive() ? "GPS" : "8×");
 
         // Genel görünümden sürüş kamerasına yumuşak geçiş, sonra kare döngüsü devralır.
         camBearing = route.bearingAt(0, 60);
@@ -406,6 +512,8 @@ public class MainActivity extends Activity {
 
     private void stopNavigation() {
         navigating = false;
+        liveMode = false;
+        locator.stop();
         freeRoam = false;
         camMode = Cam.FOLLOW;
         btnRecenter.setText("◎");
@@ -458,7 +566,13 @@ public class MainActivity extends Activity {
     }
 
     private void cycleSpeed() {
-        if (sim == null) return;
+        if (!navigating) {                       // rota hazır, simülasyonla başlat
+            if (route == null) return;
+            liveMode = false;
+            startNavigation();
+            return;
+        }
+        if (sim == null || sim.isLive()) return;
         double m = sim.getMultiplier();
         double next = m >= 64 ? 1 : m * 4;
         sim.setMultiplier(next);
@@ -474,7 +588,12 @@ public class MainActivity extends Activity {
         // Sönümleme: viraja girerken kamera savrulmasın, çıkarken geri kalmasın.
         camBearing = Geo.smoothAngle(camBearing, target, 3.2, dt);
 
-        // Serbest dolaşımdaysa ya da tüm rota görünümündeyse kameraya karışma.
+        // Takip kipinde araç ekranda sabit View; diğer hâllerde haritaya bağlı sembol.
+        boolean followCam = !freeRoam && camMode == Cam.FOLLOW;
+        if (puck.getVisibility() != (followCam ? View.VISIBLE : View.GONE)) {
+            puck.setVisibility(followCam ? View.VISIBLE : View.GONE);
+        }
+
         if (!freeRoam && camMode == Cam.FOLLOW) {
             map.moveCamera(CameraUpdateFactory.newCameraPosition(navCamera(pos, camBearing)));
         } else if (!freeRoam && camMode == Cam.RADIUS) {
@@ -488,8 +607,25 @@ public class MainActivity extends Activity {
         long now = SystemClock.uptimeMillis();
         if (now - lastTraveledUpdate > 120) {
             lastTraveledUpdate = now;
-            GeoJsonSource src = styleReady() ? (GeoJsonSource) style.getSource("traveled-src") : null;
-            if (src != null) src.setGeoJson(toLine(route.traveled(d)));
+            if (styleReady()) {
+                GeoJsonSource src = (GeoJsonSource) style.getSource("traveled-src");
+                if (src != null) src.setGeoJson(toLine(route.traveled(d)));
+
+                GeoJsonSource veh = (GeoJsonSource) style.getSource("veh-src");
+                if (veh != null) {
+                    if (followCam) {
+                        veh.setGeoJson(org.maplibre.geojson.FeatureCollection
+                                .fromFeatures(new Feature[]{}));
+                    } else {
+                        veh.setGeoJson(Feature.fromGeometry(Point.fromLngLat(
+                                pos.getLongitude(), pos.getLatitude())));
+                    }
+                }
+                SymbolLayer vl = (SymbolLayer) style.getLayer("veh-layer");
+                if (vl != null && !followCam) {
+                    vl.setProperties(PropertyFactory.iconRotate((float) target));
+                }
+            }
         }
 
         updateBanner(d, speed);

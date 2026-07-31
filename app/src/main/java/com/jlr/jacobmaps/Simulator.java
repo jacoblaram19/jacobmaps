@@ -31,6 +31,12 @@ class Simulator {
     private double distance;
     private double speed;
     private double multiplier = 1.0;
+
+    /** Canlı kipte hız/konum GPS'ten geliyor, iç hız modeli devre dışı. */
+    private boolean live = false;
+    private double fixDistance = -1;   // son GPS düzeltmesinin rota üzerindeki yeri
+    private double fixSpeed = 0;       // son GPS hızı (m/s)
+    private double sinceFix = 0;       // son düzeltmeden beri geçen süre
     private boolean running;
     private long lastFrameNs;
 
@@ -69,6 +75,18 @@ class Simulator {
 
     void setMultiplier(double m) { multiplier = m; }
 
+    void setLive(boolean l) { live = l; if (l) multiplier = 1.0; }
+
+    boolean isLive() { return live; }
+
+    /** Yeni GPS düzeltmesi: hedefi güncelle, sıçratma. */
+    void onFix(double snappedDistance, double speedMps) {
+        fixDistance = snappedDistance;
+        fixSpeed = Math.max(0, speedMps);
+        sinceFix = 0;
+        if (distance <= 0) distance = snappedDistance;   // ilk düzeltmede yerine otur
+    }
+
     double getMultiplier() { return multiplier; }
 
     double getDistance() { return distance; }
@@ -78,7 +96,29 @@ class Simulator {
         speed = 0;
     }
 
+    /**
+     * Canlı kip: iki GPS düzeltmesi arasında ölü hesapla ilerliyor, düzeltme gelince
+     * oraya sıçramak yerine sönümlemeyle yaklaşıyor. Ekranda takılma/geri tepme olmuyor.
+     */
+    private void stepLive(double dt) {
+        if (fixDistance < 0) { listener.onTick(distance, speed, dt); return; }
+        sinceFix += dt;
+
+        // GPS hızına yumuşak geçiş
+        speed += (fixSpeed - speed) * Math.min(1, 2.5 * dt);
+        distance += speed * dt;
+
+        // Düzeltmenin şu ana kadar taşınmış hâli; ona doğru yavaşça çek
+        double predicted = fixDistance + fixSpeed * sinceFix;
+        distance += (predicted - distance) * Math.min(1, 1.2 * dt);
+
+        double total = route.geometryLength();
+        if (distance > total) distance = total;
+        listener.onTick(distance, speed, dt);
+    }
+
     private void step(double dt) {
+        if (live) { stepLive(dt); return; }
         double toManeuver = route.distanceToNextStep(distance);
         double target = toManeuver < SLOW_ZONE
                 ? TURN_SPEED + (CRUISE - TURN_SPEED) * (toManeuver / SLOW_ZONE)
