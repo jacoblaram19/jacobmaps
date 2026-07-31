@@ -79,6 +79,29 @@ class Router {
         ui.post(() -> cb.onError(msg));
     }
 
+    /**
+     * Şeritler kavşaklara bağlı geliyor. Bir manevranın şeritleri, o manevranın
+     * gerçekleştiği kavşakta — yani adımın ilk kavşağında — duruyor.
+     */
+    private List<NavRoute.Lane> parseLanes(JSONObject step) {
+        JSONArray inter = step.optJSONArray("intersections");
+        if (inter == null || inter.length() == 0) return null;
+        JSONArray lanes = inter.optJSONObject(0) == null
+                ? null : inter.optJSONObject(0).optJSONArray("lanes");
+        if (lanes == null || lanes.length() == 0) return null;
+
+        List<NavRoute.Lane> out = new ArrayList<>(lanes.length());
+        for (int i = 0; i < lanes.length(); i++) {
+            JSONObject l = lanes.optJSONObject(i);
+            if (l == null) continue;
+            JSONArray ind = l.optJSONArray("indications");
+            String[] arr = new String[ind == null ? 0 : ind.length()];
+            for (int k = 0; k < arr.length; k++) arr[k] = ind.optString(k, "");
+            out.add(new NavRoute.Lane(l.optBoolean("valid", false), arr));
+        }
+        return out.isEmpty() ? null : out;
+    }
+
     private NavRoute parse(String json) throws Exception {
         JSONObject root = new JSONObject(json);
         if (!"Ok".equals(root.optString("code"))) return null;
@@ -103,11 +126,13 @@ class Router {
                 for (int i = 0; i < ss.length(); i++) {
                     JSONObject s = ss.getJSONObject(i);
                     JSONObject m = s.optJSONObject("maneuver");
-                    steps.add(new NavRoute.Step(
+                    NavRoute.Step step = new NavRoute.Step(
                             m == null ? "" : m.optString("type", ""),
                             m == null ? "" : m.optString("modifier", ""),
                             s.optString("name", ""),
-                            s.optDouble("distance", 0)));
+                            s.optDouble("distance", 0));
+                    step.lanes = parseLanes(s);
+                    steps.add(step);
                 }
             }
         }

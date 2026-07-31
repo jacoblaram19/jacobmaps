@@ -13,6 +13,16 @@ import java.util.List;
  */
 class NavRoute {
 
+    /** Kavşaktaki tek bir şerit: hangi yönlere izin veriyor ve rotamız için geçerli mi. */
+    static class Lane {
+        final boolean valid;
+        final String[] indications;
+        Lane(boolean valid, String[] indications) {
+            this.valid = valid;
+            this.indications = indications;
+        }
+    }
+
     /** Tek bir manevra adımı. */
     static class Step {
         final String type;        // turn, merge, roundabout, arrive ...
@@ -20,6 +30,7 @@ class NavRoute {
         final String name;        // yol adı
         final double distance;    // bu adımın uzunluğu (m)
         double startAt;           // rota başından bu adımın başına olan mesafe (m)
+        List<Lane> lanes;         // manevra kavşağındaki şeritler, yoksa null
 
         Step(String type, String modifier, String name, double distance) {
             this.type = type;
