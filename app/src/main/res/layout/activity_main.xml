@@ -9,56 +9,83 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- ÜST: manevra bandı (navigasyonda görünür) -->
+    <!--
+      ÜST BANT — tek bakışta okunacak şekilde kuruldu:
+      büyük simge (ne yapacağım) + büyük rakam (ne kadar kaldı) + şerit (hangi şerit).
+      Hız/varış gibi ikincil bilgiler bilerek alt kartta, burada değil.
+    -->
     <LinearLayout
         android:id="@+id/banner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
         android:layout_margin="12dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:padding="14dp"
+        android:orientation="vertical"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="10dp"
         android:elevation="10dp"
         android:background="@drawable/card"
         android:visibility="gone">
 
-        <TextView
-            android:id="@+id/maneuver_icon"
-            android:layout_width="46dp"
-            android:layout_height="46dp"
-            android:gravity="center"
-            android:textSize="26sp"
-            android:textStyle="bold"
-            android:text="↑" />
-
         <LinearLayout
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="12dp"
-            android:orientation="vertical">
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-            <TextView
-                android:id="@+id/maneuver_dist"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="26sp"
-                android:textStyle="bold"
-                android:includeFontPadding="false"
-                android:text="—" />
+            <ImageView
+                android:id="@+id/maneuver_icon"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:src="@drawable/ic_straight"
+                android:contentDescription="@null" />
 
-            <TextView
-                android:id="@+id/maneuver_road"
-                android:layout_width="match_parent"
+            <LinearLayout
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:textSize="15sp"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:includeFontPadding="false"
-                android:text="" />
+                android:layout_weight="1"
+                android:layout_marginStart="12dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/maneuver_dist"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="34sp"
+                    android:textStyle="bold"
+                    android:includeFontPadding="false"
+                    android:text="—" />
+
+                <TextView
+                    android:id="@+id/maneuver_road"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:textSize="16sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    android:includeFontPadding="false"
+                    android:text="" />
+            </LinearLayout>
         </LinearLayout>
+
+        <!-- Yaklaşma çubuğu: rakamı okumadan da mesafe hissi verir -->
+        <View
+            android:id="@+id/approach_bar"
+            android:layout_width="match_parent"
+            android:layout_height="4dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bar" />
+
+        <!-- Şerit rehberliği: yalnızca dönüş/sapak yaklaşırken görünür -->
+        <com.jlr.jacobmaps.LaneView
+            android:id="@+id/lanes"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="10dp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- SAĞ: yuvarlak düğmeler -->
@@ -90,6 +117,28 @@
             android:elevation="8dp"
             android:background="@drawable/circle"
             android:text="◎" />
+
+        <TextView
+            android:id="@+id/btn_view"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:textSize="12sp"
+            android:elevation="8dp"
+            android:background="@drawable/circle"
+            android:text="20km" />
+
+        <TextView
+            android:id="@+id/btn_offline"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:textSize="12sp"
+            android:elevation="8dp"
+            android:background="@drawable/circle"
+            android:text="indir" />
     </LinearLayout>
 
     <!-- ALT: bilgi kartı ve eylem -->

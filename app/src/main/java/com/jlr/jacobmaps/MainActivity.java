@@ -24,9 +24,15 @@ import org.maplibre.android.camera.CameraPosition;
 import org.maplibre.android.camera.CameraUpdateFactory;
 import org.maplibre.android.geometry.LatLng;
 import org.maplibre.android.geometry.LatLngBounds;
+import org.maplibre.android.gestures.MoveGestureDetector;
 import org.maplibre.android.maps.MapLibreMap;
 import org.maplibre.android.maps.MapView;
 import org.maplibre.android.maps.Style;
+import org.maplibre.android.offline.OfflineManager;
+import org.maplibre.android.offline.OfflineRegion;
+import org.maplibre.android.offline.OfflineRegionError;
+import org.maplibre.android.offline.OfflineRegionStatus;
+import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition;
 import org.maplibre.android.style.layers.LineLayer;
 import org.maplibre.android.style.layers.Property;
 import org.maplibre.android.style.layers.PropertyFactory;
@@ -63,14 +69,18 @@ public class MainActivity extends Activity {
     private static final double NAV_TILT = 58.0;
     /** Aracın ekranda durduğu yer: alttan yukarı doğru oranı. */
     private static final double PUCK_AT = 0.72;
+    /** ~20 km yarıçapı ekrana sığdıran yakınlaştırma (41° enlem için). */
+    private static final double RADIUS_ZOOM = 11.6;
 
     private MapView mapView;
     private MapLibreMap map;
     private Style style;
 
-    private View bannerView, bottomCard, sideButtons;
-    private TextView maneuverIcon, maneuverDist, maneuverRoad;
-    private TextView title, subtitle, btnPrimary, btnSecondary, btnTheme, btnRecenter;
+    private View bannerView, bottomCard, sideButtons, approachBar;
+    private ImageView maneuverIcon;
+    private TextView maneuverDist, maneuverRoad;
+    private TextView title, subtitle, btnPrimary, btnSecondary, btnTheme, btnRecenter, btnOffline, btnView;
+    private LaneView laneView;
     private ImageView puck;
 
     private final Router router = new Router();
@@ -84,6 +94,13 @@ public class MainActivity extends Activity {
     private boolean navigating = false;
     private double camBearing = 0;
     private long lastTraveledUpdate = 0;
+    private boolean offlineBusy = false;
+
+    /** Kamera kipi: sürüş takibi, 20 km çevre, tüm rota. */
+    private enum Cam { FOLLOW, RADIUS, ROUTE }
+    private Cam camMode = Cam.FOLLOW;
+    /** Kullanıcı haritayı elle gezdirdiyse kamera ona karışmıyor. */
+    private boolean freeRoam = false;
 
     // ---- yaşam döngüsü ----------------------------------------------------
 
@@ -109,6 +126,20 @@ public class MainActivity extends Activity {
 
             loadStyle();
 
+            // Kullanıcı haritayı elle gezdirirse otomatik kamera susar; jest kaynaklı
+            // hareketler bu dinleyiciye düşer, bizim moveCamera çağrılarımız düşmez.
+            map.addOnMoveListener(new MapLibreMap.OnMoveListener() {
+                @Override public void onMoveBegin(@NonNull MoveGestureDetector d) {
+                    if (navigating) {
+                        freeRoam = true;
+                        btnRecenter.setText("konum");
+                        btnRecenter.setTextSize(11f);
+                    }
+                }
+                @Override public void onMove(@NonNull MoveGestureDetector d) { }
+                @Override public void onMoveEnd(@NonNull MoveGestureDetector d) { }
+            });
+
             map.addOnMapLongClickListener(p -> {
                 if (navigating) return true;
                 destination = p;
@@ -127,6 +158,10 @@ public class MainActivity extends Activity {
         bottomCard = findViewById(R.id.bottom_card);
         sideButtons = findViewById(R.id.side_buttons);
         maneuverIcon = findViewById(R.id.maneuver_icon);
+        approachBar = findViewById(R.id.approach_bar);
+        laneView = findViewById(R.id.lanes);
+        btnOffline = findViewById(R.id.btn_offline);
+        btnView = findViewById(R.id.btn_view);
         maneuverDist = findViewById(R.id.maneuver_dist);
         maneuverRoad = findViewById(R.id.maneuver_road);
         title = findViewById(R.id.title);
@@ -137,10 +172,19 @@ public class MainActivity extends Activity {
         btnRecenter = findViewById(R.id.btn_recenter);
 
         btnPrimary.setOnClickListener(v -> onPrimary());
+        btnOffline.setOnClickListener(v -> downloadOffline());
+        btnView.setOnClickListener(v -> cycleCam());
         btnSecondary.setOnClickListener(v -> cycleSpeed());
         btnTheme.setOnClickListener(v -> { dark = !dark; applyUiTheme(); loadStyle(); });
         btnRecenter.setOnClickListener(v -> {
-            if (route != null && !navigating) fitRoute();
+            if (navigating) {
+                freeRoam = false;
+                camMode = Cam.FOLLOW;
+                btnView.setText("20km");
+                snapToFollow();
+            } else if (route != null) {
+                fitRoute();
+            }
         });
     }
 
@@ -165,6 +209,9 @@ public class MainActivity extends Activity {
 
     private void loadStyle() {
         if (map == null) return;
+        // Yeni stil yüklenirken eski Style nesnesi geçersiz kalıyor; kare döngüsü
+        // ona dokunursa MapLibre "newer style is loading" diye çöküyordu.
+        style = null;
         map.setStyle(new Style.Builder().fromUri(dark ? STYLE_DARK : STYLE_LIGHT), s -> {
             style = s;
             // Stil değişince kaynak/katmanlar sıfırlanır, yeniden kuruyoruz.
@@ -183,14 +230,17 @@ public class MainActivity extends Activity {
         tint(bannerView, card);
         tint(btnTheme, card);
         tint(btnRecenter, card);
+        tint(btnOffline, card);
+        tint(btnView, card);
 
         title.setTextColor(text);
         subtitle.setTextColor(dim);
         maneuverDist.setTextColor(text);
         maneuverRoad.setTextColor(dim);
-        maneuverIcon.setTextColor(dark ? 0xFF4DA3FF : 0xFF0B7BE0);
         btnTheme.setTextColor(text);
         btnRecenter.setTextColor(text);
+        btnOffline.setTextColor(text);
+        btnView.setTextColor(text);
         btnSecondary.setTextColor(text);
         btnSecondary.getBackground().setTint(dark ? 0x22FFFFFF : 0x18000000);
     }
@@ -203,8 +253,13 @@ public class MainActivity extends Activity {
 
     // ---- harita katmanları ------------------------------------------------
 
+    /** Stil yüklü ve geçerli mi — kaynaklara dokunmadan önce şart. */
+    private boolean styleReady() {
+        return style != null && style.isFullyLoaded();
+    }
+
     private void setupLayers() {
-        if (style == null) return;
+        if (!styleReady()) return;
 
         style.addImage("pin", drawableToBitmap(R.drawable.pin));
 
@@ -254,13 +309,13 @@ public class MainActivity extends Activity {
     }
 
     private void drawRoute() {
-        if (style == null || route == null) return;
+        if (!styleReady() || route == null) return;
         GeoJsonSource src = (GeoJsonSource) style.getSource("route-src");
         if (src != null) src.setGeoJson(toLine(route.points));
     }
 
     private void drawDestination() {
-        if (style == null || destination == null) return;
+        if (!styleReady() || destination == null) return;
         GeoJsonSource src = (GeoJsonSource) style.getSource("dest-src");
         if (src != null) {
             src.setGeoJson(Feature.fromGeometry(Point.fromLngLat(
@@ -290,7 +345,7 @@ public class MainActivity extends Activity {
                 route = r;
                 drawRoute();
                 fitRoute();
-                title.setText("İstanbul → Enez");
+                title.setText("İstanbul - Enez");
                 subtitle.setText(String.format(Locale.US, "%.0f km · %.0f sa %.0f dk · %d manevra",
                         r.distance / 1000, Math.floor(r.duration / 3600),
                         Math.floor((r.duration % 3600) / 60), r.steps.size()));
@@ -331,6 +386,9 @@ public class MainActivity extends Activity {
         sim.reset();
         sim.setMultiplier(8);
 
+        camMode = Cam.FOLLOW;
+        freeRoam = false;
+        btnView.setText("20km");
         bannerView.setVisibility(View.VISIBLE);
         bannerView.setAlpha(0f);
         bannerView.animate().alpha(1f).setDuration(260).start();
@@ -348,6 +406,10 @@ public class MainActivity extends Activity {
 
     private void stopNavigation() {
         navigating = false;
+        freeRoam = false;
+        camMode = Cam.FOLLOW;
+        btnRecenter.setText("◎");
+        btnRecenter.setTextSize(20f);
         if (sim != null) sim.stop();
         puck.setVisibility(View.GONE);
         bannerView.setVisibility(View.GONE);
@@ -359,6 +421,40 @@ public class MainActivity extends Activity {
             map.animateCamera(CameraUpdateFactory.newCameraPosition(cp), 700);
         }
         fitRoute();
+    }
+
+    /** 20 km çevre → tüm rota → sürüş takibi. */
+    private void cycleCam() {
+        if (!navigating) { if (route != null) fitRoute(); return; }
+        freeRoam = false;
+        btnRecenter.setText("◎");
+        btnRecenter.setTextSize(20f);
+
+        switch (camMode) {
+            case FOLLOW:
+                camMode = Cam.RADIUS;
+                btnView.setText("rota");
+                break;
+            case RADIUS:
+                camMode = Cam.ROUTE;
+                btnView.setText("sürüş");
+                fitRoute();
+                break;
+            default:
+                camMode = Cam.FOLLOW;
+                btnView.setText("20km");
+                snapToFollow();
+                break;
+        }
+    }
+
+    /** Sürüş kamerasına yumuşak dönüş. */
+    private void snapToFollow() {
+        if (map == null || route == null || sim == null) return;
+        double d = sim.getDistance();
+        camBearing = route.bearingAt(d, 55);
+        map.animateCamera(CameraUpdateFactory.newCameraPosition(
+                navCamera(route.positionAt(d), camBearing)), 650);
     }
 
     private void cycleSpeed() {
@@ -378,14 +474,21 @@ public class MainActivity extends Activity {
         // Sönümleme: viraja girerken kamera savrulmasın, çıkarken geri kalmasın.
         camBearing = Geo.smoothAngle(camBearing, target, 3.2, dt);
 
-        map.moveCamera(CameraUpdateFactory.newCameraPosition(navCamera(pos, camBearing)));
+        // Serbest dolaşımdaysa ya da tüm rota görünümündeyse kameraya karışma.
+        if (!freeRoam && camMode == Cam.FOLLOW) {
+            map.moveCamera(CameraUpdateFactory.newCameraPosition(navCamera(pos, camBearing)));
+        } else if (!freeRoam && camMode == Cam.RADIUS) {
+            // 20 km çevre: kuzey yukarı, düz bakış, araç merkezde.
+            map.moveCamera(CameraUpdateFactory.newCameraPosition(
+                    new CameraPosition.Builder()
+                            .target(pos).zoom(RADIUS_ZOOM).tilt(0).bearing(0).build()));
+        }
 
         // Kat edilen çizgi her karede değil, saniyede ~8 kez güncellensin.
         long now = SystemClock.uptimeMillis();
         if (now - lastTraveledUpdate > 120) {
             lastTraveledUpdate = now;
-            GeoJsonSource src = style == null ? null
-                    : (GeoJsonSource) style.getSource("traveled-src");
+            GeoJsonSource src = styleReady() ? (GeoJsonSource) style.getSource("traveled-src") : null;
             if (src != null) src.setGeoJson(toLine(route.traveled(d)));
         }
 
@@ -406,24 +509,106 @@ public class MainActivity extends Activity {
                 .build();
     }
 
+    /**
+     * Üst bant. Tasarım ölçütü: 110 km/s'te giderken bir saniyelik bakışta
+     * "ne kadar kaldı / ne yapacağım / hangi şerit" cevaplanmalı. Bu yüzden
+     * eşikler mesafeye değil SÜREYE bağlı — 400 m şehirde uzak, otoyolda 13 saniye.
+     */
     private void updateBanner(double d, double speed) {
         NavRoute.Step next = route.nextStep(d);
         double toTurn = route.distanceToNextStep(d);
         double remain = route.geometryLength() - d;
 
-        maneuverIcon.setText(arrowFor(next));
+        // Manevraya kalan süre; durunca sonsuza gitmesin diye taban hız var.
+        double t = toTurn / Math.max(speed, 8.0);
+
+        // 20 sn uzakta mavi, 4 sn kala kırmızı.
+        double ramp = clamp01((20.0 - t) / 16.0);
+        int color = rampColor(ramp);
+
+        maneuverIcon.setImageResource(iconFor(next));
+        maneuverIcon.setImageTintList(android.content.res.ColorStateList.valueOf(color));
         maneuverDist.setText(formatDistance(toTurn));
+        maneuverDist.setTextColor(ramp > 0.55 ? color : (dark ? 0xFFE6EDF3 : 0xFF0B1620));
         maneuverRoad.setText(next == null || next.name.isEmpty()
                 ? describe(next) : describe(next) + " · " + next.name);
 
+        // Yaklaşma çubuğu: rakamı okumadan mesafe hissi.
+        approachBar.setPivotX(0f);
+        approachBar.setScaleX((float) ramp);
+        tint(approachBar, color);
+
+        // Şerit rehberliği yalnızca dönüş/sapakta ve manevraya ~15 sn kala.
+        boolean showLanes = next != null && next.lanes != null
+                && isTurnLike(next) && t < 30.0;
+        if (showLanes) {
+            laneView.setColors(color, dark ? 0x4DFFFFFF : 0x33000000,
+                    dark ? 0x1AFFFFFF : 0x0F000000);
+            laneView.setLanes(next.lanes);
+            if (laneView.getVisibility() != View.VISIBLE) {
+                laneView.setVisibility(View.VISIBLE);
+                laneView.setAlpha(0f);
+                laneView.animate().alpha(1f).setDuration(180).start();
+            }
+        } else if (laneView.getVisibility() == View.VISIBLE) {
+            laneView.setVisibility(View.GONE);
+        }
+
         title.setText(formatDistance(remain) + " kaldı");
-        subtitle.setText(String.format(Locale.US, "%.0f km/sa · varış %s",
-                speed * 3.6, eta(remain, speed)));
+        double secs = etaSeconds(remain);
+        subtitle.setText(String.format(Locale.US, "%.0f km/sa · tahmini varış %s inşallah · %s",
+                speed * 3.6, clockAfter(secs), humanDuration(secs)));
     }
 
-    private String eta(double remain, double speed) {
-        double v = Math.max(speed, 60 / 3.6);
-        int mins = (int) Math.round(remain / v / 60.0);
+    /** Düz devam eden adımlarda şerit göstermiyoruz — zaten akıp gidiyor. */
+    private boolean isTurnLike(NavRoute.Step s) {
+        String type = s.type == null ? "" : s.type;
+        String mod = s.modifier == null ? "" : s.modifier;
+        if (type.contains("ramp") || type.equals("fork") || type.equals("merge")
+                || type.equals("roundabout") || type.equals("rotary")
+                || type.equals("end of road")) {
+            return true;
+        }
+        if (type.equals("turn")) return mod.contains("left") || mod.contains("right");
+        return false;
+    }
+
+    private double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+    /** Mavi → kehribar → kırmızı. */
+    private int rampColor(double t) {
+        int blue = dark ? 0xFF4DA3FF : 0xFF0B7BE0;
+        int amber = 0xFFE3A008;
+        int red = 0xFFE5484D;
+        return t < 0.5 ? lerpColor(blue, amber, t / 0.5)
+                       : lerpColor(amber, red, (t - 0.5) / 0.5);
+    }
+
+    private int lerpColor(int a, int b, double t) {
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+        int r = (int) (ar + (br - ar) * t);
+        int g = (int) (ag + (bg - ag) * t);
+        int bl = (int) (ab + (bb - ab) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    /** Kalan süre: anlık hızdan değil, rotanın kendi tahmininden oranlanıyor. */
+    private double etaSeconds(double remain) {
+        double total = route.geometryLength();
+        return total > 0 ? route.duration * (remain / total) : 0;
+    }
+
+    /** Varış saati — "ne kadar kaldı"dan çok "saat kaçta varırım" sorusunun cevabı. */
+    private String clockAfter(double secs) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.add(java.util.Calendar.SECOND, (int) Math.round(secs));
+        return String.format(Locale.US, "%02d:%02d",
+                c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE));
+    }
+
+    private String humanDuration(double secs) {
+        int mins = (int) Math.round(secs / 60.0);
         if (mins < 60) return mins + " dk";
         return (mins / 60) + " sa " + (mins % 60) + " dk";
     }
@@ -455,17 +640,87 @@ public class MainActivity extends Activity {
         return "Düz devam";
     }
 
-    private String arrowFor(NavRoute.Step s) {
-        if (s == null) return "↑";
-        if ("arrive".equals(s.type)) return "◎";
+    private int iconFor(NavRoute.Step s) {
+        if (s == null) return R.drawable.ic_straight;
+        if ("arrive".equals(s.type)) return R.drawable.ic_arrive;
+        if ("merge".equals(s.type)) return R.drawable.ic_merge;
         String mod = s.modifier == null ? "" : s.modifier;
-        if (mod.contains("sharp left")) return "↰";
-        if (mod.contains("sharp right")) return "↱";
-        if (mod.contains("slight left")) return "↖";
-        if (mod.contains("slight right")) return "↗";
-        if (mod.contains("left")) return "←";
-        if (mod.contains("right")) return "→";
-        return "↑";
+        if (mod.contains("sharp left")) return R.drawable.ic_sharp_left;
+        if (mod.contains("sharp right")) return R.drawable.ic_sharp_right;
+        if (mod.contains("slight left")) return R.drawable.ic_slight_left;
+        if (mod.contains("slight right")) return R.drawable.ic_slight_right;
+        if (mod.contains("left")) return R.drawable.ic_left;
+        if (mod.contains("right")) return R.drawable.ic_right;
+        return R.drawable.ic_straight;
+    }
+
+    // ---- çevrimdışı harita ------------------------------------------------
+
+    /**
+     * Marmara/Trakya koridorunu (İstanbul → Edirne → Enez) çevrimdışı indirir.
+     *
+     * MapLibre'nin OfflineManager'ı stil + sınır + zoom aralığı için gereken bütün
+     * karoları yerel veritabanına çekiyor; sonrasında aynı stil internetsiz açılıyor.
+     * z13'te tabela/yol adları okunuyor, daha yükseği yolculuk için gereksiz yer kaplar.
+     */
+    private void downloadOffline() {
+        if (offlineBusy) { toast("indirme sürüyor"); return; }
+        offlineBusy = true;
+        btnOffline.setText("0%");
+
+        LatLngBounds bounds = new LatLngBounds.Builder()
+                .include(new LatLng(41.70, 29.65))   // kuzeydoğu: İstanbul'un doğusu
+                .include(new LatLng(40.30, 25.80))   // güneybatı: Enez / Saros
+                .build();
+
+        OfflineTilePyramidRegionDefinition def = new OfflineTilePyramidRegionDefinition(
+                dark ? STYLE_DARK : STYLE_LIGHT, bounds, 5, 13,
+                getResources().getDisplayMetrics().density);
+
+        OfflineManager om = OfflineManager.getInstance(this);
+        om.setOfflineMapboxTileCountLimit(200000);
+        om.createOfflineRegion(def, "marmara".getBytes(),
+                new OfflineManager.CreateOfflineRegionCallback() {
+            @Override public void onCreate(OfflineRegion region) {
+                region.setObserver(new OfflineRegion.OfflineRegionObserver() {
+                    @Override public void onStatusChanged(OfflineRegionStatus status) {
+                        long req = status.getRequiredResourceCount();
+                        long done = status.getCompletedResourceCount();
+                        int pct = req > 0 ? (int) (100 * done / req) : 0;
+                        if (status.isComplete()) {
+                            offlineBusy = false;
+                            btnOffline.setText("✓");
+                            subtitle.setText(String.format(Locale.US,
+                                    "Marmara çevrimdışı hazır · %.0f MB",
+                                    status.getCompletedResourceSize() / 1048576.0));
+                        } else {
+                            btnOffline.setText(pct + "%");
+                        }
+                    }
+                    @Override public void onError(OfflineRegionError error) {
+                        offlineBusy = false;
+                        btnOffline.setText("indir");
+                        subtitle.setText("indirme hatası: " + error.getMessage());
+                    }
+                    @Override public void mapboxTileCountLimitExceeded(long limit) {
+                        offlineBusy = false;
+                        btnOffline.setText("indir");
+                        subtitle.setText("karo sınırı aşıldı (" + limit + ")");
+                    }
+                });
+                region.setDownloadState(OfflineRegion.STATE_ACTIVE);
+                subtitle.setText("Marmara indiriliyor (İstanbul → Enez)");
+            }
+            @Override public void onError(String error) {
+                offlineBusy = false;
+                btnOffline.setText("indir");
+                subtitle.setText("bölge açılamadı: " + error);
+            }
+        });
+    }
+
+    private void toast(String m) {
+        Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
     }
 
     // ---- MapView yaşam döngüsü --------------------------------------------
